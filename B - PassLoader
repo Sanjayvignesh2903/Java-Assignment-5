@@ -1,0 +1,228 @@
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class PassLoader {
+    // rewriteBatchedStatements=true enables true multi-row batching in MySQL Connector/J
+    private static final String URL = "jdbc:mysql://localhost:3306/campus_test_db?rewriteBatchedStatements=true";
+    private static final String USER = "root";
+    private static final String PWD = "password";
+
+    /**
+     * Loads all passes in one transaction, in batches of 1,000 rows.
+     * Returns the number of rows loaded.
+     */
+    public static int loadAll(Connection con, List<String[]> passes) throws SQLException {
+        String sql = "INSERT INTO bus_pass(pass_id, reg_no, name, route_no, amount) "
+                + "VALUES (?, ?, ?, ?, ?)";
+        boolean oldAutoCommit = con.getAutoCommit();
+        con.setAutoCommit(false);
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            int n = 0;
+            for (String[] p : passes) {
+                // TODO 1: Set the five parameters from p (route as int, amount as double),
+                // add the row to the batch, and execute the batch after every 1,000 rows
+                ps.setString(1, p[0]);
+                ps.setString(2, p[1]);
+                ps.setString(3, p[2]);
+                ps.setInt(4, Integer.parseInt(p[3]));
+                ps.setDouble(5, Double.parseDouble(p[4]));
+                ps.addBatch();
+                n++;
+                if (n % 1000 == 0) {
+                    ps.executeBatch();
+                }
+            }
+            ps.executeBatch();
+
+            // TODO 2: Make all inserted rows permanent and return the number of rows loaded
+            con.commit();
+            return n;
+        } catch (SQLException | RuntimeException e) {
+            // TODO 3: Undo every insert made in this transaction, then re-throw the exception
+            con.rollback();
+            throw e;
+        } finally {
+            con.setAutoCommit(oldAutoCommit);
+        }
+    }
+
+    // (a) Insert using plain Statement (one SQL parse + round-trip per row)
+    private static long insertWithStatement(Connection con, List<String[]> passes) throws SQLException {
+        long start = System.nanoTime();
+        try (Statement st = con.createStatement()) {
+            for (String[] p : passes) {
+                String sql = "INSERT INTO bus_pass(pass_id, reg_no, name, route_no, amount) VALUES ('"
+                        + p[0] + "','" + p[1] + "','" + p[2] + "'," + p[3] + "," + p[4] + ")";
+                st.executeUpdate(sql);
+            }
+        }
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    // (b) Insert using PreparedStatement without batching
+    private static long insertWithPreparedStatement(Connection con, List<String[]> passes) throws SQLException {
+        String sql = "INSERT INTO bus_pass(pass_id, reg_no, name, route_no, amount) VALUES (?, ?, ?, ?, ?)";
+        long start = System.nanoTime();
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            for (String[] p : passes) {
+                ps.setString(1, p[0]);
+                ps.setString(2, p[1]);
+                ps.setString(3, p[2]);
+                ps.setInt(4, Integer.parseInt(p[3]));
+                ps.setDouble(5, Double.parseDouble(p[4]));
+                ps.executeUpdate();
+            }
+        }
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    // (c) Insert using Batch with Auto-Commit ON (for B3.3 comparison)
+    private static void loadBatchAutoCommitOn(Connection con, List<String[]> passes) throws SQLException {
+        String sql = "INSERT INTO bus_pass(pass_id, reg_no, name, route_no, amount) VALUES (?, ?, ?, ?, ?)";
+        con.setAutoCommit(true);
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            int n = 0;
+            for (String[] p : passes) {
+                ps.setString(1, p[0]);
+                ps.setString(2, p[1]);
+                ps.setString(3, p[2]);
+                ps.setInt(4, Integer.parseInt(p[3]));
+                ps.setDouble(5, Double.parseDouble(p[4]));
+                ps.addBatch();
+                n++;
+                if (n % 5 == 0) { // Small batch so first half commits before failure
+                    ps.executeBatch();
+                }
+            }
+            ps.executeBatch();
+        }
+    }
+
+    // Helper: Generate synthetic bus-pass rows
+    private static List<String[]> generatePasses(int count) {
+        List<String[]> list = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            list.add(new String[]{
+                "P" + i,
+                "192324" + String.format("%03d", i % 1000),
+                "Student" + i,
+                String.valueOf((i % 20) + 1),
+                "4500.0"
+            });
+        }
+        return list;
+    }
+
+    private static void truncateTable(Connection con) throws SQLException {
+        try (Statement st = con.createStatement()) {
+            st.executeUpdate("TRUNCATE TABLE bus_pass");
+        }
+    }
+
+    private static int countRows(Connection con) throws SQLException {
+        try (Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM bus_pass")) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    // B3.1: Verify table contents and column types using ResultSetMetaData
+    private static void runB31Verification(Connection con) throws SQLException {
+        System.out.println("=== B3.1: Correctness & ResultSetMetaData Verification (10 Rows) ===");
+        List<String[]> small = generatePasses(10);
+
+        truncateTable(con);
+        insertWithStatement(con, small);
+        System.out.println("Statement inserted rows         : " + countRows(con));
+
+        truncateTable(con);
+        insertWithPreparedStatement(con, small);
+        System.out.println("PreparedStatement inserted rows : " + countRows(con));
+
+        truncateTable(con);
+        loadAll(con, small);
+        System.out.println("Batch (loadAll) inserted rows   : " + countRows(con));
+
+        try (Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery("SELECT * FROM bus_pass LIMIT 3")) {
+            ResultSetMetaData meta = rs.getMetaData();
+            int cols = meta.getColumnCount();
+
+            System.out.println("\nTable Schema (from ResultSetMetaData):");
+            for (int i = 1; i <= cols; i++) {
+                System.out.printf("  Col %d: %-10s | Type: %s(%d)%n",
+                        i, meta.getColumnName(i), meta.getColumnTypeName(i), meta.getColumnDisplaySize(i));
+            }
+
+            System.out.println("\nSample Rows:");
+            while (rs.next()) {
+                System.out.printf("  %s | %s | %s | Route %d | Rs. %.2f%n",
+                        rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getInt(4), rs.getDouble(5));
+            }
+        }
+    }
+
+    // B3.2: Benchmark Statement vs. PreparedStatement vs. Batch
+    private static void runB32Benchmark(Connection con) throws SQLException {
+        System.out.println("\n=== B3.2: Performance Benchmark (ms) ===");
+        System.out.printf("%-10s | %-14s | %-18s | %-18s%n",
+                "Rows", "Statement (ms)", "PreparedStmt (ms)", "Batch+Txn (ms)");
+        System.out.println("-------------------------------------------------------------------");
+
+        int[] sizes = {1_000, 10_000, 100_000};
+        for (int size : sizes) {
+            List<String[]> data = generatePasses(size);
+
+            truncateTable(con);
+            long tStmt = insertWithStatement(con, data);
+
+            truncateTable(con);
+            long tPrep = insertWithPreparedStatement(con, data);
+
+            truncateTable(con);
+            long startBatch = System.nanoTime();
+            loadAll(con, data);
+            long tBatch = (System.nanoTime() - startBatch) / 1_000_000;
+
+            System.out.printf("%-10d | %-14d | %-18d | %-18d%n", size, tStmt, tPrep, tBatch);
+        }
+    }
+
+    // B3.3: Auto-commit ON vs. Single Transaction with forced half-way failure
+    private static void runB33TransactionFailureTest(Connection con) throws SQLException {
+        System.out.println("\n=== B3.3: Half-Way Failure Test (Auto-Commit ON vs. Transaction) ===");
+        List<String[]> faultyData = generatePasses(20);
+        // Inject an invalid non-numeric amount at index 10 (half-way)
+        faultyData.set(10, new String[]{"P11", "192324011", "BadRow", "5", "INVALID_AMOUNT"});
+
+        // Case 1: Auto-Commit ON -> partial rows remain committed!
+        truncateTable(con);
+        try {
+            loadBatchAutoCommitOn(con, faultyData);
+        } catch (Exception e) {
+            System.out.println("Auto-Commit ON failed with  : " + e.getClass().getSimpleName() + " (" + e.getMessage() + ")");
+        }
+        System.out.println("Rows remaining (Auto-Commit ON) : " + countRows(con) + "  <-- PARTIAL / INCONSISTENT DATA");
+
+        // Case 2: Single Transaction (loadAll) -> rolled back cleanly to 0 rows!
+        truncateTable(con);
+        try {
+            loadAll(con, faultyData);
+        } catch (Exception e) {
+            System.out.println("Transaction failed with     : " + e.getClass().getSimpleName() + " (" + e.getMessage() + ")");
+        }
+        System.out.println("Rows remaining (Transaction)    : " + countRows(con) + "  <-- CLEAN ROLLBACK");
+    }
+
+    public static void main(String[] args) {
+        try (Connection con = DriverManager.getConnection(URL, USER, PWD)) {
+            runB31Verification(con);
+            runB32Benchmark(con);
+            runB33TransactionFailureTest(con);
+        } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+        }
+    }
+}
