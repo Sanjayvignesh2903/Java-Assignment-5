@@ -1,0 +1,175 @@
+import java.io.*;
+import java.nio.file.*;
+import java.sql.*;
+import java.util.*;
+
+public class PassMigrationTool {
+    private static final String URL = "jdbc:mysql://localhost:3306/campus_test_db?rewriteBatchedStatements=true";
+    private static final String USER = "root";
+    private static final String PWD = "password";
+    private static final int BATCH_SIZE = 1000;
+
+    // B4.2: Inspect the Database using DatabaseMetaData
+    public static void inspectDatabase(Connection con) throws SQLException {
+        DatabaseMetaData meta = con.getMetaData();
+        System.out.println("=== B4.2: Database Metadata Inspection ===");
+        System.out.println("Database Product : " + meta.getDatabaseProductName()
+                + " " + meta.getDatabaseProductVersion());
+        System.out.println("JDBC Driver      : " + meta.getDriverName()
+                + " " + meta.getDriverVersion());
+        System.out.println("Connected URL    : " + meta.getURL());
+
+        System.out.println("Tables Present   :");
+        try (ResultSet rs = meta.getTables(con.getCatalog(), null, "%", new String[]{"TABLE"})) {
+            while (rs.next()) {
+                System.out.println("  - " + rs.getString("TABLE_NAME"));
+            }
+        }
+    }
+
+    // B4.1: Migrate pass CSV file into MySQL using batches + single transaction + failure report
+    public static void migrateFileToDatabase(Connection con, Path csvFile) throws IOException, SQLException {
+        System.out.println("\n=== B4.1: File-to-Database Migration ===");
+        List<String> failedRecords = new ArrayList<>();
+        Set<String> seenPassIds = new HashSet<>();
+
+        String sql = "INSERT INTO bus_pass(pass_id, reg_no, name, route_no, amount) "
+                + "VALUES (?, ?, ?, ?, ?)";
+
+        boolean oldAutoCommit = con.getAutoCommit();
+        con.setAutoCommit(false);
+
+        int migratedCount = 0;
+        int lineNo = 0;
+
+        try (BufferedReader br = Files.newBufferedReader(csvFile);
+             PreparedStatement ps = con.prepareStatement(sql)) {
+
+            String line;
+            while ((line = br.readLine()) != null) {
+                lineNo++;
+
+                // 1. Validate non-empty line
+                if (line.trim().isEmpty()) {
+                    failedRecords.add("Line " + lineNo + " [Empty line]");
+                    continue;
+                }
+
+                // 2. Validate exact field count (5 fields)
+                String[] f = line.split(",", -1);
+                if (f.length != 5) {
+                    failedRecords.add("Line " + lineNo + " [Wrong field count=" + f.length + "]: " + line);
+                    continue;
+                }
+
+                String passId = f[0].trim();
+                String regNo = f[1].trim();
+                String name = f[2].trim();
+
+                if (passId.isEmpty() || regNo.isEmpty() || name.isEmpty()) {
+                    failedRecords.add("Line " + lineNo + " [Missing required text field]: " + line);
+                    continue;
+                }
+
+                // 3. Reject duplicate Pass IDs within the same file
+                if (!seenPassIds.add(passId)) {
+                    failedRecords.add("Line " + lineNo + " [Duplicate Pass ID=" + passId + "]: " + line);
+                    continue;
+                }
+
+                // 4. Validate numeric fields (route_no > 0, amount >= 0)
+                int routeNo;
+                double amount;
+                try {
+                    routeNo = Integer.parseInt(f[3].trim());
+                    amount = Double.parseDouble(f[4].trim());
+                    if (routeNo <= 0 || amount < 0) {
+                        failedRecords.add("Line " + lineNo + " [Negative/zero route or amount]: " + line);
+                        continue;
+                    }
+                } catch (NumberFormatException e) {
+                    failedRecords.add("Line " + lineNo + " [Non-numeric route/amount]: " + line);
+                    continue;
+                }
+
+                // Add valid record to JDBC batch
+                ps.setString(1, passId);
+                ps.setString(2, regNo);
+                ps.setString(3, name);
+                ps.setInt(4, routeNo);
+                ps.setDouble(5, amount);
+                ps.addBatch();
+                migratedCount++;
+
+                if (migratedCount % BATCH_SIZE == 0) {
+                    ps.executeBatch();
+                }
+            }
+
+            ps.executeBatch(); // Flush remaining records
+            con.commit();      // Commit entire migration atomically
+
+        } catch (SQLException e) {
+            con.rollback();    // Roll back all inserts if a DB-level error occurs
+            System.err.println("Migration aborted and rolled back: " + e.getMessage());
+            throw e;
+        } finally {
+            con.setAutoCommit(oldAutoCommit);
+        }
+
+        // Print Migration Summary & Failure Report
+        System.out.println("Total Lines Read       : " + lineNo);
+        System.out.println("Successfully Migrated  : " + migratedCount);
+        System.out.println("Failed Validation      : " + failedRecords.size());
+
+        if (!failedRecords.isEmpty()) {
+            System.out.println("\n--- Validation Failure Report ---");
+            for (String err : failedRecords) {
+                System.out.println("  " + err);
+            }
+        }
+    }
+
+    // Helper: Create a sample legacy CSV file containing valid and invalid records
+    private static Path createSampleLegacyFile() throws IOException {
+        Path temp = Files.createTempFile("legacy_passes_", ".csv");
+        String sampleData = String.join("\n",
+                "P2001,192324061,Sanjay Vignesh R,12,4500.0",   // Valid
+                "P2002,192324062,Abinaya Sri,7,3800.0",         // Valid
+                "P2003,ONLY_TWO_FIELDS",                        // Invalid: wrong field count
+                "P2004,192324064,Karthik R,5,FREE_PASS",        // Invalid: non-numeric amount
+                "P2001,192324061,Sanjay Duplicate,12,4500.0",   // Invalid: duplicate Pass ID
+                "",                                             // Invalid: empty line
+                "P2005,192324065,Divya M,-2,4000.0",            // Invalid: negative route
+                "P2006,192324066,Arun K,15,5200.0"              // Valid
+        ) + "\n";
+        Files.writeString(temp, sampleData);
+        return temp;
+    }
+
+    public static void main(String[] args) {
+        Path legacyFile = null;
+        try (Connection con = DriverManager.getConnection(URL, USER, PWD)) {
+            // 1. Inspect database metadata (B4.2)
+            inspectDatabase(con);
+
+            // Clean table before demo run
+            try (Statement st = con.createStatement()) {
+                st.executeUpdate("TRUNCATE TABLE bus_pass");
+            }
+
+            // 2. Run migration with batching, transaction, and failure report (B4.1)
+            legacyFile = createSampleLegacyFile();
+            migrateFileToDatabase(con, legacyFile);
+
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+        } finally {
+            if (legacyFile != null) {
+                try {
+                    Files.deleteIfExists(legacyFile);
+                } catch (IOException ignored) {}
+            }
+        }
+    }
+}
