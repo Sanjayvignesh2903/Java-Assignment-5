@@ -1,0 +1,99 @@
+import java.sql.*;
+
+public class WalletSecurityDemo {
+    private static final String URL = "jdbc:mysql://localhost:3306/campus_wallet";
+    private static final String USER = "root";
+    private static final String PWD = "password";
+
+    // A5.1: Atomic Wallet Transfer using JDBC Transaction (commit / rollback)
+    public static boolean transferWallet(String studentId, double amount) {
+        String debitHostelSql =
+                "UPDATE wallets SET hostel_balance = hostel_balance - ? " +
+                "WHERE student_id = ? AND hostel_balance >= ?";
+        String creditCanteenSql =
+                "UPDATE wallets SET canteen_balance = canteen_balance + ? " +
+                "WHERE student_id = ?";
+
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection(URL, USER, PWD);
+            conn.setAutoCommit(false); // Start transaction
+
+            // Step 1: Debit hostel wallet (only if sufficient balance exists)
+            try (PreparedStatement debitPs = conn.prepareStatement(debitHostelSql)) {
+                debitPs.setDouble(1, amount);
+                debitPs.setString(2, studentId);
+                debitPs.setDouble(3, amount);
+                int rowsDebited = debitPs.executeUpdate();
+                if (rowsDebited != 1) {
+                    throw new SQLException("Insufficient hostel balance or student not found.");
+                }
+            }
+
+            // Step 2: Credit canteen wallet
+            try (PreparedStatement creditPs = conn.prepareStatement(creditCanteenSql)) {
+                creditPs.setDouble(1, amount);
+                creditPs.setString(2, studentId);
+                int rowsCredited = creditPs.executeUpdate();
+                if (rowsCredited != 1) {
+                    throw new SQLException("Failed to credit canteen wallet.");
+                }
+            }
+
+            conn.commit(); // Both updates succeeded -> make permanent
+            System.out.println("Transfer of Rs. " + amount + " committed successfully.");
+            return true;
+
+        } catch (SQLException e) {
+            // Failure between or during updates -> undo everything
+            if (conn != null) {
+                try {
+                    conn.rollback();
+                    System.err.println("Transaction rolled back: " + e.getMessage());
+                } catch (SQLException rollbackEx) {
+                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
+                }
+            }
+            return false;
+
+        } finally {
+            if (conn != null) {
+                try {
+                    conn.setAutoCommit(true);
+                    conn.close();
+                } catch (SQLException ignored) {}
+            }
+        }
+    }
+
+    // A5.2: SQL-Injection-Safe Login using PreparedStatement
+    // Crafted input like id = "admin' OR '1'='1' -- " is treated strictly as literal data, not SQL
+    public static boolean safeLogin(String id, String pwd) {
+        String sql = "SELECT id FROM users WHERE id = ? AND pwd = ?";
+
+        try (Connection conn = DriverManager.getConnection(URL, USER, PWD);
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+
+            ps.setString(1, id);
+            ps.setString(2, pwd);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next(); // true only if exact id and pwd match
+            }
+        } catch (SQLException e) {
+            System.err.println("Login error: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public static void main(String[] args) {
+        // 1. Test A5.2: Safe Login vs SQL Injection attempt
+        System.out.println("=== Login Security Test ===");
+        System.out.println("Valid login      : " + safeLogin("192324061", "pass123"));
+        System.out.println("Injection attack : " + safeLogin("admin' OR '1'='1' -- ", "wrong"));
+
+        // 2. Test A5.1: Atomic Transfer of Rs. 500
+        System.out.println("\n=== Atomic Wallet Transfer Test ===");
+        transferWallet("192324061", 500.0);
+    }
+}
