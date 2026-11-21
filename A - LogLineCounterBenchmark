@@ -1,0 +1,95 @@
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.List;
+
+public class LogLineCounterBenchmark {
+    private static final String LOG_FILE = "attendance_log.txt";
+    private static final int TARGET_SIZE_MB = 5; // Change to 50 for full 50 MB test
+    private static final int BUFFER_SIZE = 8192; // 8 KB buffer
+
+    // Helper: Generate a sample attendance log file of the target size
+    private static void generateSampleLog(Path path, int sizeMb) throws IOException {
+        byte[] sampleLine = "2026-11-21 09:00:00,192324061,PRESENT,BLOCK-A\n"
+                .getBytes(StandardCharsets.UTF_8);
+        long targetBytes = (long) sizeMb * 1024 * 1024;
+        long written = 0;
+
+        try (BufferedOutputStream bos = new BufferedOutputStream(
+                new FileOutputStream(path.toFile()), BUFFER_SIZE)) {
+            while (written < targetBytes) {
+                bos.write(sampleLine);
+                written += sampleLine.length;
+            }
+        }
+    }
+
+    // 1. Unbuffered: 1 byte at a time (1 OS syscall per byte -> very slow)
+    private static long countLinesUnbuffered(File file) throws IOException {
+        long lines = 0;
+        try (FileInputStream fis = new FileInputStream(file)) {
+            int b;
+            while ((b = fis.read()) != -1) {
+                if (b == '\n') {
+                    lines++;
+                }
+            }
+        }
+        return lines;
+    }
+
+    // 2. Buffered with byte[] array: 1 OS syscall per 8 KB chunk -> O(buffer size) memory
+    private static long countLinesBufferedArray(File file) throws IOException {
+        long lines = 0;
+        byte[] buffer = new byte[BUFFER_SIZE];
+        try (FileInputStream fis = new FileInputStream(file)) {
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                for (int i = 0; i < bytesRead; i++) {
+                    if (buffer[i] == '\n') {
+                        lines++;
+                    }
+                }
+            }
+        }
+        return lines;
+    }
+
+    // 3. Alternative: Files.readAllLines() -> loads entire file into RAM (O(file size) memory)
+    private static long countLinesReadAll(Path path) throws IOException {
+        List<String> allLines = Files.readAllLines(path, StandardCharsets.UTF_8);
+        return allLines.size();
+    }
+
+    public static void main(String[] args) throws IOException {
+        Path path = Paths.get(LOG_FILE);
+        System.out.println("Generating " + TARGET_SIZE_MB + " MB sample attendance log...");
+        generateSampleLog(path, TARGET_SIZE_MB);
+
+        File file = path.toFile();
+        long fileSize = file.length();
+        System.out.println("File Size: " + fileSize + " bytes\n");
+
+        // Test 1: Unbuffered
+        long t1 = System.nanoTime();
+        long c1 = countLinesUnbuffered(file);
+        long ms1 = (System.nanoTime() - t1) / 1_000_000;
+        System.out.println("1. Unbuffered (1 byte/call)  : " + c1 + " lines | " + ms1 + " ms | ~" + fileSize + " OS read calls");
+
+        // Test 2: Buffered byte[]
+        long t2 = System.nanoTime();
+        long c2 = countLinesBufferedArray(file);
+        long ms2 = (System.nanoTime() - t2) / 1_000_000;
+        long bufferedCalls = (fileSize + BUFFER_SIZE - 1) / BUFFER_SIZE;
+        System.out.println("2. Buffered (8 KB byte[])    : " + c2 + " lines | " + ms2 + " ms | ~" + bufferedCalls + " OS read calls");
+
+        // Test 3: Files.readAllLines()
+        long t3 = System.nanoTime();
+        long c3 = countLinesReadAll(path);
+        long ms3 = (System.nanoTime() - t3) / 1_000_000;
+        System.out.println("3. Files.readAllLines()      : " + c3 + " lines | " + ms3 + " ms | Loads entire file into Heap");
+
+        // Clean up generated file
+        Files.deleteIfExists(path);
+    }
+}
