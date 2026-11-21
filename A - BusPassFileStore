@@ -1,0 +1,226 @@
+import java.io.*;
+import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
+
+// 1. Model Class: BusPass Record
+class BusPass {
+    String passId;
+    String regNo;
+    String name;
+    String routeNo;
+    String boardingStop;
+    String validityDate;
+    double amountPaid;
+
+    public BusPass(String passId, String regNo, String name, String routeNo,
+                   String boardingStop, String validityDate, double amountPaid) {
+        this.passId = passId;
+        this.regNo = regNo;
+        this.name = name;
+        this.routeNo = routeNo;
+        this.boardingStop = boardingStop;
+        this.validityDate = validityDate;
+        this.amountPaid = amountPaid;
+    }
+
+    @Override
+    public String toString() {
+        return passId + " | " + regNo + " | " + name + " | Route " + routeNo
+                + " (" + boardingStop + ") | Valid: " + validityDate + " | Rs. " + amountPaid;
+    }
+}
+
+// 2. Persistence Manager: Delimited Text File + Binary File (DataOutputStream)
+public class BusPassFileStore {
+    private static final String TEXT_FILE = "bus_passes.txt";
+    private static final String BINARY_FILE = "bus_passes.dat";
+    private static final String DELIM = "|";
+
+    // Escape delimiter inside fields (e.g., a name containing '|')
+    private static String escape(String s) {
+        return s.replace("\\", "\\\\").replace("|", "\\|");
+    }
+
+    // Unescape fields when reading back
+    private static String unescape(String s) {
+        return s.replace("\\|", "|").replace("\\\\", "\\");
+    }
+
+    // Split on unescaped '|' delimiter
+    private static String[] splitRecord(String line) {
+        return line.split("(?<!\\\\)\\|", -1);
+    }
+
+    // (i) Add a new pass to delimited text file (atomic temp-file + move prevents partial writes)
+    public static void addPassText(BusPass p) throws IOException {
+        Path target = Paths.get(TEXT_FILE);
+        Path temp = Paths.get(TEXT_FILE + ".tmp");
+
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(temp.toFile()))) {
+            if (Files.exists(target)) {
+                try (BufferedReader br = new BufferedReader(new FileReader(target.toFile()))) {
+                    String existing;
+                    while ((existing = br.readLine()) != null) {
+                        bw.write(existing);
+                        bw.newLine();
+                    }
+                }
+            }
+            String record = String.join(DELIM,
+                    escape(p.passId),
+                    escape(p.regNo),
+                    escape(p.name),
+                    escape(p.routeNo),
+                    escape(p.boardingStop),
+                    escape(p.validityDate),
+                    String.valueOf(p.amountPaid));
+            bw.write(record);
+            bw.newLine();
+            bw.flush();
+        }
+        Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    // Parse one line safely; returns null if the line is damaged/corrupted
+    private static BusPass parseLine(String line, int lineNo) {
+        String[] parts = splitRecord(line);
+        if (parts.length != 7) {
+            System.err.println("[Warning] Skipped damaged line " + lineNo + ": wrong field count.");
+            return null;
+        }
+        try {
+            double amount = Double.parseDouble(parts[6].trim());
+            return new BusPass(
+                    unescape(parts[0]),
+                    unescape(parts[1]),
+                    unescape(parts[2]),
+                    unescape(parts[3]),
+                    unescape(parts[4]),
+                    unescape(parts[5]),
+                    amount
+            );
+        } catch (NumberFormatException e) {
+            System.err.println("[Warning] Skipped damaged line " + lineNo + ": invalid amount.");
+            return null;
+        }
+    }
+
+    // (ii) Find a pass by Pass ID (handles missing file and damaged lines)
+    public static BusPass findByPassId(String passId) throws IOException {
+        File file = new File(TEXT_FILE);
+        if (!file.exists()) {
+            System.err.println("[Info] File not found: " + TEXT_FILE);
+            return null;
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String line;
+            int lineNo = 0;
+            while ((line = br.readLine()) != null) {
+                lineNo++;
+                BusPass p = parseLine(line, lineNo);
+                if (p != null && p.passId.equalsIgnoreCase(passId)) {
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
+    // (iii) List all passes on a given route
+    public static List<BusPass> listByRoute(String routeNo) throws IOException {
+        List<BusPass> results = new ArrayList<>();
+        File file = new File(TEXT_FILE);
+        if (!file.exists()) {
+            return results;
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String line;
+            int lineNo = 0;
+            while ((line = br.readLine()) != null) {
+                lineNo++;
+                BusPass p = parseLine(line, lineNo);
+                if (p != null && p.routeNo.equalsIgnoreCase(routeNo)) {
+                    results.add(p);
+                }
+            }
+        }
+        return results;
+    }
+
+    // Binary Format: Write a pass using DataOutputStream
+    public static void addPassBinary(BusPass p) throws IOException {
+        try (DataOutputStream dos = new DataOutputStream(
+                new BufferedOutputStream(new FileOutputStream(BINARY_FILE, true)))) {
+            dos.writeUTF(p.passId);
+            dos.writeUTF(p.regNo);
+            dos.writeUTF(p.name);
+            dos.writeUTF(p.routeNo);
+            dos.writeUTF(p.boardingStop);
+            dos.writeUTF(p.validityDate);
+            dos.writeDouble(p.amountPaid);
+        }
+    }
+
+    // Binary Format: Read all passes using DataInputStream
+    public static List<BusPass> readAllBinary() throws IOException {
+        List<BusPass> list = new ArrayList<>();
+        File file = new File(BINARY_FILE);
+        if (!file.exists()) return list;
+
+        try (DataInputStream dis = new DataInputStream(
+                new BufferedInputStream(new FileInputStream(file)))) {
+            while (true) {
+                try {
+                    list.add(new BusPass(
+                            dis.readUTF(), dis.readUTF(), dis.readUTF(),
+                            dis.readUTF(), dis.readUTF(), dis.readUTF(),
+                            dis.readDouble()
+                    ));
+                } catch (EOFException e) {
+                    break; // End of binary file reached cleanly
+                }
+            }
+        }
+        return list;
+    }
+
+    public static void main(String[] args) throws IOException {
+        // Start clean for demo
+        Files.deleteIfExists(Paths.get(TEXT_FILE));
+        Files.deleteIfExists(Paths.get(BINARY_FILE));
+
+        // 1. Add passes (including a name containing the '|' delimiter)
+        BusPass p1 = new BusPass("BP101", "192324061", "Sanjay | Vignesh", "R12", "Tambaram", "2027-05-31", 12500.0);
+        BusPass p2 = new BusPass("BP102", "192324062", "Abinaya Sri", "R12", "Chromepet", "2027-05-31", 12500.0);
+        BusPass p3 = new BusPass("BP103", "192324063", "Karthik R", "R05", "Velachery", "2027-05-31", 14000.0);
+
+        addPassText(p1);
+        addPassText(p2);
+        addPassText(p3);
+
+        // Simulate a damaged line appended to the text file
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(TEXT_FILE, true))) {
+            bw.write("CORRUPTED|LINE|MISSING_FIELDS");
+            bw.newLine();
+        }
+
+        // 2. Find by Pass ID
+        System.out.println("=== Find Pass BP101 ===");
+        System.out.println(findByPassId("BP101"));
+
+        // 3. List all passes on Route R12 (safely skips damaged line)
+        System.out.println("\n=== Passes on Route R12 ===");
+        for (BusPass p : listByRoute("R12")) {
+            System.out.println(p);
+        }
+
+        // 4. Binary file write & read demonstration
+        addPassBinary(p1);
+        addPassBinary(p3);
+        System.out.println("\n=== Binary File Records ===");
+        for (BusPass p : readAllBinary()) {
+            System.out.println(p);
+        }
+    }
+}
