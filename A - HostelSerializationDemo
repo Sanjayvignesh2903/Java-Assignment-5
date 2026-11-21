@@ -1,0 +1,109 @@
+import java.io.*;
+import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.List;
+
+// 1. Resident class: marks password and live DB Connection as transient
+class Resident implements Serializable {
+    private static final long serialVersionUID = 1L; // Ensures backward compatibility
+
+    private final String regNo;
+    private final String name;
+    private final String phoneNumber; // New field: defaults to null if loaded from older file
+
+    private transient String password;      // Excluded for security
+    private transient Connection dbConn;    // Excluded: live resource, not Serializable
+
+    public Resident(String regNo, String name, String phoneNumber, String password, Connection dbConn) {
+        this.regNo = regNo;
+        this.name = name;
+        this.phoneNumber = phoneNumber;
+        this.password = password;
+        this.dbConn = dbConn;
+    }
+
+    @Override
+    public String toString() {
+        return regNo + " | " + name + " | Phone: " + phoneNumber
+                + " | Password: " + password + " | DB Conn: " + dbConn;
+    }
+}
+
+// 2. Room class: part of the serializable object graph
+class Room implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final int roomNumber;
+    private final List<Resident> residents = new ArrayList<>();
+
+    public Room(int roomNumber) {
+        this.roomNumber = roomNumber;
+    }
+
+    public void addResident(Resident r) {
+        residents.add(r);
+    }
+
+    public int getRoomNumber() { return roomNumber; }
+    public List<Resident> getResidents() { return residents; }
+}
+
+// 3. Hostel class: root of the object graph
+class Hostel implements Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final String hostelName;
+    private final List<Room> rooms = new ArrayList<>();
+
+    public Hostel(String hostelName) {
+        this.hostelName = hostelName;
+    }
+
+    public void addRoom(Room room) {
+        rooms.add(room);
+    }
+
+    public void printState() {
+        System.out.println("Hostel: " + hostelName);
+        for (Room room : rooms) {
+            System.out.println("  Room " + room.getRoomNumber() + ":");
+            for (Resident r : room.getResidents()) {
+                System.out.println("    " + r);
+            }
+        }
+    }
+}
+
+// 4. Main class: Serializes and deserializes the Hostel object graph
+public class HostelSerializationDemo {
+    private static final String FILE_NAME = "hostel_state.ser";
+
+    public static void main(String[] args) {
+        // Build object graph
+        Hostel hostel = new Hostel("Block A - Boys Hostel");
+        Room r101 = new Room(101);
+        r101.addResident(new Resident("192324061", "Sanjay Vignesh R", "9876543210", "secret123", null));
+        r101.addResident(new Resident("192324062", "Karthik R", "9123456780", "pass456", null));
+        hostel.addRoom(r101);
+
+        System.out.println("=== BEFORE SERIALIZATION ===");
+        hostel.printState();
+
+        // Serialize entire object graph
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(FILE_NAME))) {
+            oos.writeObject(hostel);
+            System.out.println("\nSaved hostel state to " + FILE_NAME);
+        } catch (IOException e) {
+            System.err.println("Serialization failed: " + e.getMessage());
+        }
+
+        // Deserialize object graph (transient fields become null)
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(FILE_NAME))) {
+            Hostel loaded = (Hostel) ois.readObject();
+            System.out.println("\n=== AFTER DESERIALIZATION ===");
+            loaded.printState();
+        } catch (IOException | ClassNotFoundException e) {
+            System.err.println("Deserialization failed: " + e.getMessage());
+        }
+    }
+}
