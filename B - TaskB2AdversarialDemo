@@ -1,0 +1,139 @@
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.nio.file.*;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class TaskB2AdversarialDemo {
+    private static final String URL = "jdbc:mysql://localhost:3306/campus_test_db";
+    private static final String USER = "root";
+    private static final String PWD = "password";
+
+    // =========================================================================
+    // PART 1: UNSAFE vs. SAFE LOGIN (SQL Injection Demonstration)
+    // =========================================================================
+
+    // UNSAFE: Direct string concatenation allows crafted input to alter SQL logic
+    public static boolean unsafeLogin(String id, String pwd) throws SQLException {
+        String sql = "SELECT * FROM users WHERE id='" + id + "' AND pwd='" + pwd + "'";
+        try (Connection c = DriverManager.getConnection(URL, USER, PWD);
+             Statement st = c.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            return rs.next();
+        }
+    }
+
+    // SAFE: PreparedStatement binds parameters strictly as data, never executable SQL
+    public static boolean safeLogin(String id, String pwd) throws SQLException {
+        String sql = "SELECT * FROM users WHERE id = ? AND pwd = ?";
+        try (Connection c = DriverManager.getConnection(URL, USER, PWD);
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, id);
+            ps.setString(2, pwd);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static void runSqlInjectionTests() {
+        System.out.println("=== 1. ADVERSARIAL SQL INJECTION TEST ===");
+        String validId = "192324061";
+        String validPwd = "secret123";
+        String wrongPwd = "wrong_password";
+
+        // Crafted adversarial payload: closes the string, injects always-true condition, comments out rest
+        String attackId = "' OR '1'='1' -- ";
+
+        try {
+            System.out.println("Test A (Valid Credentials):");
+            System.out.println("  Unsafe Login : " + unsafeLogin(validId, validPwd));
+            System.out.println("  Safe Login   : " + safeLogin(validId, validPwd));
+
+            System.out.println("\nTest B (Normal Invalid Credentials):");
+            System.out.println("  Unsafe Login : " + unsafeLogin(validId, wrongPwd));
+            System.out.println("  Safe Login   : " + safeLogin(validId, wrongPwd));
+
+            System.out.println("\nTest C (Adversarial Input -> id = \"" + attackId + "\"):");
+            System.out.println("  Unsafe Login : " + unsafeLogin(attackId, wrongPwd) + "  <-- BYPASSED!");
+            System.out.println("  Safe Login   : " + safeLogin(attackId, wrongPwd) + " <-- REJECTED!");
+
+        } catch (SQLException e) {
+            System.err.println("Database connection failed (ensure MySQL & campus_test_db are running): "
+                    + e.getMessage());
+        }
+    }
+
+    // =========================================================================
+    // PART 2: DAMAGED BUS-PASS FILE TEST (Resilient File Store)
+    // =========================================================================
+
+    public static List<String[]> loadValidPasses(Path file) throws IOException {
+        List<String[]> validRecords = new ArrayList<>();
+        try (BufferedReader br = Files.newBufferedReader(file)) {
+            String line;
+            int lineNo = 0;
+            while ((line = br.readLine()) != null) {
+                lineNo++;
+
+                // 1. Reject empty / blank lines
+                if (line.trim().isEmpty()) {
+                    System.out.println("  [Skipped Line " + lineNo + "] Empty line");
+                    continue;
+                }
+
+                // 2. Reject wrong number of fields (must be exactly 5)
+                String[] fields = line.split(",", -1);
+                if (fields.length != 5) {
+                    System.out.println("  [Skipped Line " + lineNo + "] Wrong field count (" + fields.length + "): " + line);
+                    continue;
+                }
+
+                // 3. Reject non-numeric route or amount
+                try {
+                    Integer.parseInt(fields[3].trim());
+                    Double.parseDouble(fields[4].trim());
+                } catch (NumberFormatException e) {
+                    System.out.println("  [Skipped Line " + lineNo + "] Non-numeric route/amount: " + line);
+                    continue;
+                }
+
+                validRecords.add(fields);
+            }
+        }
+        return validRecords;
+    }
+
+    private static void runDamagedFileTests() throws IOException {
+        System.out.println("\n=== 2. ADVERSARIAL DAMAGED BUS-PASS FILE TEST ===");
+        Path tempFile = Files.createTempFile("damaged_passes_", ".csv");
+
+        // Construct file with valid lines mixed with 3 types of adversarial/damaged lines
+        String content = String.join("\n",
+                "P1001,192324061,Sanjay,12,4500.0",        // Valid
+                "P1002,ONLY_TWO_FIELDS",                   // Damaged: wrong field count
+                "P1003,192324062,Arun,12,NOT_A_NUMBER",    // Damaged: non-numeric amount
+                "",                                        // Damaged: empty line
+                "P1004,192324063,Divya,7,3800.0"           // Valid
+        ) + "\n";
+
+        Files.writeString(tempFile, content);
+
+        System.out.println("Reading damaged file...");
+        List<String[]> valid = loadValidPasses(tempFile);
+
+        System.out.println("\nValid Passes Recovered (" + valid.size() + "):");
+        for (String[] row : valid) {
+            System.out.println("  " + Arrays.toString(row));
+        }
+
+        Files.deleteIfExists(tempFile);
+    }
+
+    public static void main(String[] args) throws IOException {
+        runSqlInjectionTests();
+        runDamagedFileTests();
+    }
+}
