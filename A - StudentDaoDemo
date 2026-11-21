@@ -1,0 +1,169 @@
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+// 1. Model Class: Maps Student fields to columns of the 'student' table
+// Table mapping:
+//   regNo (String)      <-> reg_no VARCHAR(20) PRIMARY KEY
+//   name (String)       <-> name VARCHAR(100)
+//   department (String) <-> department VARCHAR(50)
+//   cgpa (double)       <-> cgpa DOUBLE
+class Student {
+    private String regNo;
+    private String name;
+    private String department;
+    private double cgpa;
+
+    public Student(String regNo, String name, String department, double cgpa) {
+        this.regNo = regNo;
+        this.name = name;
+        this.department = department;
+        this.cgpa = cgpa;
+    }
+
+    public String getRegNo() { return regNo; }
+    public String getName() { return name; }
+    public String getDepartment() { return department; }
+    public double getCgpa() { return cgpa; }
+
+    public void setName(String name) { this.name = name; }
+    public void setDepartment(String department) { this.department = department; }
+    public void setCgpa(double cgpa) { this.cgpa = cgpa; }
+
+    @Override
+    public String toString() {
+        return regNo + " | " + name + " | " + department + " | CGPA: " + cgpa;
+    }
+}
+
+// 2. Generic Data-Access Interface: T = Entity type, K = Primary Key type
+interface Dao<T, K> {
+    void insert(T entity) throws SQLException;
+    T findById(K id) throws SQLException;
+    List<T> findAll() throws SQLException;
+    boolean update(T entity) throws SQLException;
+    boolean delete(K id) throws SQLException;
+}
+
+// 3. Shared Connection Utility (eliminates repeated connection code across DAOs)
+class DBConnection {
+    private static final String URL = "jdbc:mysql://localhost:3306/university_db";
+    private static final String USER = "root";
+    private static final String PWD = "password";
+
+    public static Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(URL, USER, PWD);
+    }
+}
+
+// 4. Concrete DAO Implementation for Student
+class StudentDao implements Dao<Student, String> {
+
+    // Helper: maps a single ResultSet row to a Student object
+    private Student mapRow(ResultSet rs) throws SQLException {
+        return new Student(
+                rs.getString("reg_no"),
+                rs.getString("name"),
+                rs.getString("department"),
+                rs.getDouble("cgpa")
+        );
+    }
+
+    @Override
+    public void insert(Student s) throws SQLException {
+        String sql = "INSERT INTO student (reg_no, name, department, cgpa) VALUES (?, ?, ?, ?)";
+        try (Connection c = DBConnection.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, s.getRegNo());
+            ps.setString(2, s.getName());
+            ps.setString(3, s.getDepartment());
+            ps.setDouble(4, s.getCgpa());
+            ps.executeUpdate();
+        }
+    }
+
+    @Override
+    public Student findById(String regNo) throws SQLException {
+        String sql = "SELECT reg_no, name, department, cgpa FROM student WHERE reg_no = ?";
+        try (Connection c = DBConnection.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, regNo);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? mapRow(rs) : null;
+            }
+        }
+    }
+
+    @Override
+    public List<Student> findAll() throws SQLException {
+        List<Student> students = new ArrayList<>();
+        String sql = "SELECT reg_no, name, department, cgpa FROM student ORDER BY reg_no";
+        try (Connection c = DBConnection.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                students.add(mapRow(rs));
+            }
+        }
+        return students;
+    }
+
+    @Override
+    public boolean update(Student s) throws SQLException {
+        String sql = "UPDATE student SET name = ?, department = ?, cgpa = ? WHERE reg_no = ?";
+        try (Connection c = DBConnection.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, s.getName());
+            ps.setString(2, s.getDepartment());
+            ps.setDouble(3, s.getCgpa());
+            ps.setString(4, s.getRegNo());
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    @Override
+    public boolean delete(String regNo) throws SQLException {
+        String sql = "DELETE FROM student WHERE reg_no = ?";
+        try (Connection c = DBConnection.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, regNo);
+            return ps.executeUpdate() > 0;
+        }
+    }
+}
+
+// 5. Main Class: Demonstrates CRUD via the generic Dao<Student, String> interface
+public class StudentDaoDemo {
+    public static void main(String[] args) {
+        Dao<Student, String> studentDao = new StudentDao();
+
+        try {
+            // Insert
+            Student s1 = new Student("192324061", "Sanjay Vignesh R", "AI & DS", 8.8);
+            studentDao.insert(s1);
+            System.out.println("Inserted: " + s1);
+
+            // Find by ID
+            Student fetched = studentDao.findById("192324061");
+            System.out.println("Found by ID: " + fetched);
+
+            // Update
+            fetched.setCgpa(9.0);
+            studentDao.update(fetched);
+            System.out.println("Updated: " + studentDao.findById("192324061"));
+
+            // Find All
+            System.out.println("\nAll Students:");
+            for (Student s : studentDao.findAll()) {
+                System.out.println("  " + s);
+            }
+
+            // Delete
+            boolean deleted = studentDao.delete("192324061");
+            System.out.println("\nDeleted 192324061: " + deleted);
+
+        } catch (SQLException e) {
+            System.err.println("Database error: " + e.getMessage());
+        }
+    }
+}
